@@ -1,0 +1,421 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  Upload, 
+  FileSpreadsheet, 
+  Download, 
+  Calculator, 
+  Settings, 
+  CheckCircle2, 
+  AlertCircle, 
+  Eye, 
+  Database, 
+  FileText,
+  RefreshCw,
+  ChevronDown,
+  ChevronUp,
+  Scale
+} from 'lucide-react';
+
+// Pre-loaded from your provided complete vendor list
+const INITIAL_VENDOR_REGISTRY = {
+  "SAW": "1001", "ACTUAL": "1002", "AirLife": "1003", "Daynamo": "1004", "Punch": "1005",
+  "RCJ": "1006", "Rugatchi": "1007", "Crash": "1008", "2Y": "1009", "Plus18": "1010",
+  "Marrakech": "1011", "Rollie": "1012", "Yadawiya": "1014", "Juan Raul (JR)": "1015",
+  "NEGRO": "1016", "King Brich": "1017", "Mr.lii": "1018", "Champ": "1019", "The champ": "1019",
+  "Look Man": "1020", "LOOKMAN": "1020", "BREEZY": "1021", "JCJ": "1022", "PERFUME": "1023",
+  "Polize": "1023", "Nomarc": "1024", "Maxim": "1025", "Deezy": "1026", "LenaSo": "1027",
+  "3 line": "1029", "2512": "1030", "oscar": "1031", "Tarz": "1032"
+};
+
+// Weight Table provided by user (kg)
+const WEIGHT_TABLE = {
+  "t-shirt": 0.25,
+  "oversize t-shirt": 0.3,
+  "polo shirt": 0.32,
+  "dress shirt": 0.33,
+  "tank top": 0.18,
+  "pants": 0.55,
+  "jeans": 0.8,
+  "jacket": 0.6,
+  "hoodie": 1.2,
+  "sweater": 0.8,
+  "knitwear": 0.95,
+  "suit": 1.0
+};
+
+const SHIPPING_RATE_PER_KG = 6.1;
+const FALLBACK_WEIGHT = 0.5;
+
+const App = () => {
+  const [inventoryData, setInventoryData] = useState(null);
+  const [inventoryFileName, setInventoryFileName] = useState('');
+  const [vendorRegistry, setVendorRegistry] = useState(INITIAL_VENDOR_REGISTRY);
+  const [showAllRows, setShowAllRows] = useState(false);
+  const [config, setConfig] = useState({
+    tax: 6,
+    markup: 3.5
+  });
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [result, setResult] = useState(null);
+  const [libLoaded, setLibLoaded] = useState(false);
+
+  useEffect(() => {
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.async = true;
+    script.onload = () => setLibLoaded(true);
+    document.head.appendChild(script);
+  }, []);
+
+  const getRowValue = (row, targetHeader) => {
+    const cleanTarget = targetHeader.toLowerCase().replace(/\s/g, '');
+    const key = Object.keys(row).find(k => k.toLowerCase().replace(/\s/g, '') === cleanTarget);
+    return key ? row[key] : '';
+  };
+
+  const smartSplit = (text) => {
+    if (!text) return [];
+    let standardized = String(text).replace(/[,;]|\s+-\s+/g, ',');
+    let parts = standardized.includes(',') ? standardized.split(',') : standardized.split(/\s+/);
+    return parts.map(p => p.trim()).filter(p => p.length > 0);
+  };
+
+  const parseSizes = (text) => {
+    if (!text) return [];
+    const str = String(text).trim();
+    const sizeRegex = /[0-9]+X[SL]|X+[SL]|[SML]|[0-9]+/gi;
+    const matches = str.match(sizeRegex);
+    if (matches && matches.length > 0) {
+      return matches.map(m => {
+        let size = m.toUpperCase();
+        if (/^X{2,}[LS]$/.test(size)) {
+          const count = size.length - 1;
+          const letter = size.slice(-1);
+          return `${count}X${letter}`;
+        }
+        return size;
+      });
+    }
+    return smartSplit(text);
+  };
+
+  const getVendorAbbr = (vendor) => {
+    const name = String(vendor || 'UN').trim();
+    const words = name.split(/\s+/).filter(w => w.length > 0);
+    if (words.length === 1) return words[0].substring(0, 2).toUpperCase();
+    return words.map(w => w[0]).join('').toUpperCase();
+  };
+
+  const getItemWeight = (category) => {
+    const cleanCat = String(category || '').toLowerCase().trim();
+    return WEIGHT_TABLE[cleanCat] || FALLBACK_WEIGHT;
+  };
+
+  const handleInventoryUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setInventoryFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const bstr = evt.target.result;
+      const XLSX = window.XLSX;
+      const wb = XLSX.read(bstr, { type: 'binary' });
+      const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+      setInventoryData(data);
+      setResult(null);
+      setShowAllRows(false);
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const processInventory = () => {
+    if (!inventoryData || !window.XLSX) return;
+    setIsProcessing(true);
+
+    const tRate = config.tax / 100;
+    const mFactor = config.markup;
+    const outputRows = [];
+    let sessionRegistry = { ...vendorRegistry };
+
+    inventoryData.forEach(row => {
+      const itemCode = String(getRowValue(row, 'Item Code') || '').trim();
+      if (!itemCode) return;
+
+      const category = String(getRowValue(row, 'Category') || '').trim();
+      const vendorName = String(getRowValue(row, 'Vendor') || 'Unknown').trim();
+      const rawPrice = parseFloat(getRowValue(row, 'Price') || 0);
+      const physicalSets = parseInt(getRowValue(row, 'Stock (Per Set)') || 1);
+
+      // Weight Calculation
+      const weight = getItemWeight(category);
+      const shipCost = weight * SHIPPING_RATE_PER_KG;
+      const taxAmt = rawPrice * tRate;
+
+      // FORMULA: Default Unit Cost = Base Cost + Tax Amt + Weight Ship Cost
+      const unitCostLanded = rawPrice + taxAmt + shipCost;
+      
+      // Retail = (Landed Cost * Multiplier) -> Rounded to .99
+      const rawRetail = unitCostLanded * mFactor;
+      const retailPriceRounded = (Math.floor(rawRetail) + 0.99).toFixed(2);
+
+      const vAbbr = getVendorAbbr(vendorName);
+      
+      let vNumericCode;
+      const existingKey = Object.keys(sessionRegistry).find(k => k.toLowerCase() === vendorName.toLowerCase());
+      if (existingKey) {
+        vNumericCode = sessionRegistry[existingKey];
+      } else {
+        const codes = Object.values(sessionRegistry).map(c => parseInt(c) || 0);
+        const nextNum = Math.max(...codes, 1000) + 1;
+        vNumericCode = String(nextNum);
+        sessionRegistry[vendorName] = vNumericCode;
+      }
+      
+      const itemName = `${vAbbr}-${itemCode} ${category}`;
+      const colors = smartSplit(getRowValue(row, 'Colors'));
+      const sizes = parseSizes(getRowValue(row, 'Sizes'));
+      const colorFreq = colors.reduce((a, c) => { a[c] = (a[c] || 0) + 1; return a; }, {});
+      const sizeFreq = sizes.reduce((a, s) => { a[s] = (a[s] || 0) + 1; return a; }, {});
+
+      Object.keys(colorFreq).forEach(color => {
+        Object.keys(sizeFreq).forEach(size => {
+          const colorSlug = color.substring(0, 3).toUpperCase().replace(/\s/g, '');
+          const sizeSlug = String(size).toUpperCase().replace(/\s/g, '');
+          const sku = `${vAbbr}-${itemCode}-${colorSlug}-${sizeSlug}`;
+          const qty = colorFreq[color] * sizeFreq[size] * physicalSets;
+
+          outputRows.push({
+            "Item Name": itemName,
+            "Variation Name": `${color}, ${size}`,
+            "SKU": sku,
+            "Description": itemCode,
+            "Categories": category,
+            "Item Type": "Physical",
+            "Price": retailPriceRounded,
+            "Default Unit Cost": unitCostLanded.toFixed(2),
+            "Sellable": "Y",
+            "Stockable": "Y",
+            "Option Name 1": "Color",
+            "Option Value 1": color,
+            "Option Name 2": "Size",
+            "Option Value 2": size,
+            "Default Vendor Name": vendorName,
+            "Default Vendor Code": vNumericCode,
+            "New Quantity Choices For You": qty,
+            "Stock Alert Enabled Choices For You": "N",
+            "_meta_weight": weight,
+            "_meta_ship": shipCost.toFixed(2)
+          });
+        });
+      });
+    });
+
+    setVendorRegistry(sessionRegistry); 
+    setResult(outputRows);
+    setIsProcessing(false);
+  };
+
+  const downloadSquareCSV = () => {
+    if (!result) return;
+    const XLSX = window.XLSX;
+    // Remove metadata before export
+    const exportData = result.map(({_meta_weight, _meta_ship, ...rest}) => rest);
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+    const csvContent = XLSX.utils.sheet_to_csv(worksheet);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `SQUARE_WEIGHT_BASED_${new Date().getTime()}.csv`;
+    link.click();
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-6 md:p-12 font-sans text-slate-900 leading-normal text-sm">
+      <div className="max-w-6xl mx-auto bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden">
+        
+        {/* Header */}
+        <div className="bg-slate-900 p-8 text-white flex flex-col md:flex-row items-center justify-between gap-6">
+          <div className="flex items-center gap-5">
+            <div className="bg-blue-600 p-4 rounded-2xl shadow-lg shadow-blue-500/20">
+              <FileSpreadsheet className="text-white w-10 h-10" />
+            </div>
+            <div>
+              <h1 className="text-3xl font-black uppercase tracking-tighter">Square Logic Converter</h1>
+              <div className="flex items-center gap-2 mt-1">
+                <span className="bg-blue-500 text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest text-white whitespace-nowrap">v3.8 Weight Based</span>
+                <p className="text-slate-400 text-xs font-bold uppercase tracking-widest">Choices For You • Shipping by KG</p>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-8 bg-slate-800/50 p-4 rounded-2xl border border-slate-700/50">
+             <div className="text-center px-4 border-r border-slate-700">
+                <p className="text-[10px] text-slate-500 font-black uppercase tracking-tighter">Rate/KG</p>
+                <p className="text-xl font-black text-blue-400">$6.10</p>
+             </div>
+             <div className="text-center px-4">
+                <p className="text-[10px] text-slate-500 font-black uppercase">Processed</p>
+                <p className="text-xl font-black text-green-400">{result ? result.length : 0}</p>
+             </div>
+          </div>
+        </div>
+
+        <div className="p-10 space-y-12">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 text-sm">
+            
+            {/* Left Column: Config */}
+            <div className="space-y-10">
+              <section>
+                <div className="flex items-center gap-3 mb-6">
+                  <Calculator className="w-5 h-5 text-blue-600" />
+                  <h2 className="font-black text-xs uppercase tracking-[0.2em] text-slate-500">1. Financial Parameters</h2>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Tax (%)</label>
+                    <input type="number" value={config.tax} onChange={(e) => setConfig({...config, tax: parseFloat(e.target.value) || 0})} className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl focus:border-blue-500 font-bold text-center" />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-blue-500 uppercase tracking-widest ml-1 text-center block">Multiplier</label>
+                    <input type="number" step="0.1" value={config.markup} onChange={(e) => setConfig({...config, markup: parseFloat(e.target.value) || 1})} className="w-full p-4 bg-blue-50 border-2 border-blue-200 rounded-2xl focus:border-blue-600 font-black text-blue-700 text-lg text-center" />
+                  </div>
+                </div>
+                <div className="mt-4 p-5 bg-blue-50/50 rounded-2xl border border-blue-100 flex gap-4">
+                   <Scale className="text-blue-500 w-6 h-6 shrink-0" />
+                   <div className="text-[11px] text-blue-700 font-medium space-y-1 leading-relaxed">
+                      <p><b>Weight Logic:</b> Shipping is $6.1/kg based on Category.</p>
+                      <p><b>Unit Cost:</b> Price + (Price × {config.tax}%) + (Weight × 6.1).</p>
+                      <p><b>Retail:</b> Landed Cost × {config.markup} (Ends in .99).</p>
+                   </div>
+                </div>
+              </section>
+
+              <section>
+                <div className="flex items-center gap-3 mb-6">
+                  <Upload className="w-5 h-5 text-blue-600" />
+                  <h2 className="font-black text-xs uppercase tracking-[0.2em] text-slate-500">2. Select Inventory File</h2>
+                </div>
+                <div className="relative group">
+                  <input type="file" accept=".xlsx, .xls, .csv" onChange={handleInventoryUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
+                  <div className={`p-16 border-4 border-dashed rounded-[2rem] flex flex-col items-center justify-center transition-all ${inventoryFileName ? 'border-green-500 bg-green-50/50' : 'border-slate-200 bg-slate-50 group-hover:border-blue-500'}`}>
+                    {inventoryFileName ? (
+                      <>
+                        <CheckCircle2 className="w-16 h-16 text-green-500 mb-4" />
+                        <span className="font-black text-green-900 text-center text-lg break-all tracking-tight uppercase">{inventoryFileName}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Upload className="w-10 h-10 text-slate-300 mb-3 group-hover:text-blue-600" />
+                        <span className="text-slate-500 font-black uppercase text-sm tracking-widest text-center">Upload Excel/CSV</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            {/* Right Column: Weight Reference */}
+            <div className="flex flex-col h-full">
+              <div className="bg-slate-900 rounded-[2.5rem] p-10 flex flex-col h-full text-white border-b-[12px] border-blue-600 shadow-2xl">
+                <div className="flex items-center justify-between mb-8">
+                   <div className="flex items-center gap-3 text-white">
+                      <Scale className="w-5 h-5 text-blue-400" />
+                      <h3 className="text-[10px] font-black uppercase text-blue-400 tracking-[0.4em]">Weight Registry (kg)</h3>
+                   </div>
+                   <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest bg-slate-800 px-3 py-1 rounded-full whitespace-nowrap">$6.10/kg Rate</span>
+                </div>
+                <div className="flex-1 space-y-3 overflow-y-auto pr-4 custom-scrollbar max-h-[400px]">
+                  {Object.entries(WEIGHT_TABLE).map(([cat, weight]) => (
+                    <div key={cat} className="flex items-center justify-between border-b border-slate-800 pb-2">
+                      <span className="text-[11px] text-slate-400 font-black uppercase truncate pr-4">{cat}</span>
+                      <span className="bg-blue-600/10 text-blue-400 px-4 py-1 rounded-xl border border-blue-600/30 font-mono text-xs font-black tracking-widest">{weight}kg</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-8 text-[10px] text-slate-500 leading-relaxed italic text-white/50">
+                   Unknown categories are calculated at <span className="text-blue-400 font-black">0.5kg</span> average weight.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button onClick={processInventory} disabled={!inventoryData || isProcessing || !libLoaded} className={`w-full py-8 rounded-[2rem] font-black text-white transition-all shadow-2xl uppercase tracking-[0.4em] text-sm ${(!inventoryData || isProcessing || !libLoaded) ? 'bg-slate-200 opacity-50 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 active:scale-95'}`}>
+            {isProcessing ? (
+               <span className="flex items-center gap-3"><RefreshCw className="animate-spin" /> Recalculating Shipping...</span>
+            ) : 'Apply Weight Rules & Process'}
+          </button>
+
+          {result && (
+            <div className="space-y-10 animate-in">
+              <div className="bg-green-600 rounded-[2.5rem] p-10 text-white flex flex-col md:flex-row items-center justify-between gap-8 border-b-[12px] border-green-700 shadow-2xl">
+                <div className="flex items-center gap-6 text-white">
+                  <div className="bg-white/20 p-5 rounded-3xl">
+                    <CheckCircle2 className="w-10 h-10 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-black uppercase tracking-tight text-white">Conversion Ready</h3>
+                    <p className="text-green-100 text-xs font-black uppercase tracking-[0.2em] mt-1 opacity-90">Review weight-based costs below</p>
+                  </div>
+                </div>
+                <button onClick={downloadSquareCSV} className="bg-white text-green-700 px-12 py-6 rounded-[1.5rem] font-black flex items-center gap-4 hover:scale-105 active:scale-95 uppercase tracking-[0.2em] text-xs shadow-xl whitespace-nowrap">
+                  <Download className="w-5 h-5" /> Download Square CSV
+                </button>
+              </div>
+
+              {/* Data Preview */}
+              <div className="bg-white border-4 border-slate-50 rounded-[2.5rem] overflow-hidden shadow-sm">
+                <div className="bg-slate-50 p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b-2 border-slate-100">
+                  <div className="flex items-center gap-3">
+                    <Eye className="w-5 h-5 text-blue-600" />
+                    <span className="font-black text-slate-800 text-[10px] uppercase tracking-[0.3em]">Full Verification</span>
+                  </div>
+                  <button onClick={() => setShowAllRows(!showAllRows)} className="bg-white border-2 border-slate-200 px-4 py-2 rounded-xl flex items-center gap-2 font-black text-[10px] uppercase tracking-widest text-slate-600 hover:border-blue-500 hover:text-blue-600 transition-all shadow-sm">
+                    {showAllRows ? <><ChevronUp className="w-3 h-3" /> View Less</> : <><ChevronDown className="w-3 h-3" /> View All Data</>}
+                  </button>
+                </div>
+                <div className={`overflow-x-auto transition-all ${showAllRows ? 'max-h-[800px]' : 'max-h-[600px]'} custom-scrollbar`}>
+                  <table className="w-full text-left border-collapse">
+                    <thead className="bg-slate-50/50 text-[10px] uppercase font-black text-slate-400 sticky top-0 backdrop-blur-sm z-10 border-b-2 border-slate-100">
+                      <tr>
+                        <th className="p-6">Category / Item</th>
+                        <th className="p-6">Est. Weight</th>
+                        <th className="p-6">Ship Cost</th>
+                        <th className="p-6">Retail Price</th>
+                        <th className="p-6">Unit Cost</th>
+                        <th className="p-6">SKU</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-[11px] font-bold">
+                      {(showAllRows ? result : result.slice(0, 15)).map((row, i) => (
+                        <tr key={i} className="hover:bg-blue-50/30 transition-colors border-b border-slate-50">
+                          <td className="p-6">
+                            <div className="text-blue-700 font-black truncate max-w-[200px]">{row["Item Name"]}</div>
+                            <div className="text-[9px] text-slate-400 uppercase tracking-tighter">{row["Categories"]}</div>
+                          </td>
+                          <td className="p-6 text-slate-500">{row["_meta_weight"]} kg</td>
+                          <td className="p-6 text-slate-900 font-mono">${row["_meta_ship"]}</td>
+                          <td className="p-6 text-green-600 font-black text-lg tabular-nums">${row["Price"]}</td>
+                          <td className="p-6 text-slate-900 font-mono tracking-tighter underline decoration-slate-200 decoration-dotted underline-offset-4">${row["Default Unit Cost"]}</td>
+                          <td className="p-6 font-mono text-slate-400 text-[10px] truncate max-w-[120px] uppercase">{row["SKU"]}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      
+      <style dangerouslySetInnerHTML={{ __html: `
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.05); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(59, 130, 246, 0.3); border-radius: 10px; }
+        .animate-in { animation: slideInUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+        @keyframes slideInUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+      `}} />
+    </div>
+  );
+};
+
+export default App;
